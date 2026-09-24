@@ -6,9 +6,17 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = []
 
+[project.scripts]
+myprogram = "myprogram.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/myprogram"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.8",
+]
