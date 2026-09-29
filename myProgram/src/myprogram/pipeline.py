@@ -1,14 +1,18 @@
 from pathlib import Path
 
 from myprogram.context import RunContext
-from myprogram.stages import acquire, extract, sbm
+from myprogram.artifacts import save_word_graph
+from myprogram.stages import acquire, extract
 
 
 def run_all(name: str) -> Path:
     ctx = RunContext.create(name)
     ctx.log("pipeline.start", name=name)
+
     corpora = acquire.run(ctx)
     word_graph = extract.run(corpora, ctx)
-    sbm_result = sbm.run(word_graph, ctx)
+    save_word_graph(word_graph, ctx.run_dir)
+
     ctx.log("pipeline.done")
     return ctx.run_dir
+
