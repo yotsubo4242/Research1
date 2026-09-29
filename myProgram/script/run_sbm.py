@@ -1,6 +1,7 @@
 """共起グラフに階層的 SBM を適用する.
 
-    ~/.local/bin/micromamba run -n gt python script/run_sbm.py runs/<run_id>
+    - micromamba run -n gt python script/run_sbm.py runs/<run_id>
+    - micromamba run -n gt python script/run_sbm.py "$(ls -dt runs/*/ | head -1)"
 """
 
 import json
@@ -13,7 +14,7 @@ import numpy as np
 N_INIT = 20        # 異なる出発点から探索する回数
 DEG_CORR = True    # 次数補正
 MIN_WEIGHT = 1     # この重み未満の辺を捨てる
-N_SWEEPS = 300 # 各出発点からのMCMC掃引
+N_SWEEPS = 50 # 各出発点からのMCMC掃引
 
 
 def build_graph(nodes, edges):
