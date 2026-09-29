@@ -1,130 +1,172 @@
-import json
+import hashlib
+import re
 import time
 from pathlib import Path
-from typing import Any
+from urllib.parse import unquote
+
 import httpx
+from bs4 import BeautifulSoup
+
 from myprogram.context import RunContext
-from myprogram.types import Corpus, Document
 from myprogram.paths import DATA_DIR
+from myprogram.types import Corpus, Document, Term
 
-BASE_URL = "https://chem.libretexts.org/@api/deki"
-REQUEST_INTERVAL = 0.5
-CACHE_DIR = DATA_DIR / "raw" / "chem"
-USER_AGENT = "Research bot"
-EXCLUDE_PATTERNS = (
-    "Front Matter", "Back Matter", "Appendices",
-    "Key Terms", "Key Equations", "Summary", "Exercises",
+BASE_URL = "https://phys.libretexts.org"
+SITEMAP_URL = f"{BASE_URL}/sitemap.xml"
+REQUEST_INTERVAL = 5.0
+CACHE_DIR = DATA_DIR / "raw" / "phys"
+USER_AGENT = "Research bot (LibreTexts structure study)"
+
+# University Physics I (OpenStax)
+BOOK_ID = "university_physics_i_openstax"
+BOOK_TITLE = "University Physics I - Mechanics, Sound, Oscillations, and Waves (OpenStax)"
+BOOK_PREFIX = (
+    f"{BASE_URL}/Bookshelves/University_Physics/University_Physics_(OpenStax)/"
+    "Book%3A_University_Physics_I_-_Mechanics_Sound_Oscillations_and_Waves_(OpenStax)/"
 )
-# Chemistry 2e (OpenStax)
-BOOK_ID = "414590"
 
-def _as_list(value: Any) -> list[Any]:
-    """
-    Convert a value to a list. If the value is None, return an empty list.
-    """
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return value
-    return [value]
+# 本文ではないページ.
+EXCLUDE_PATTERNS = ("(Exercises)", "Front Matter", "Back Matter", "Index", "Glossary")
+
+# 章末要約ページ. 本文からは除くが Key Terms の供給源として使う.
+SUMMARY_MARKER = "(Summary)"
 
 
-def _get_json(client: httpx.Client, endpoint: str) -> dict[str, Any]:
-    """
-    Get JSON data from an endpoint excluding the cache.
-    """
-    cache_path = CACHE_DIR / f"{endpoint.replace('/', '_')}.json"
+def _cache_path(url: str, suffix: str = ".html") -> Path:
+    """URL からキャッシュファイルのパスを作る."""
+    last_segment = unquote(url.rstrip("/").rsplit("/", 1)[-1])
+    stem = re.sub(r"[^A-Za-z0-9._-]", "_", last_segment)[:60]
+    digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:12]
+    return CACHE_DIR / f"{stem}__{digest}{suffix}"
+
+
+def _fetch(client: httpx.Client, url: str, suffix: str = ".html") -> str:
+    """URL の内容を返す. 取得済みならキャッシュから読む."""
+    cache_path = _cache_path(url, suffix)
     if cache_path.exists():
-        return json.loads(cache_path.read_text(encoding="utf-8"))
+        return cache_path.read_text(encoding="utf-8")
 
-    response = client.get(
-        f"{BASE_URL}/{endpoint}",
-        params={"dream.out.format": "json"},
-    )
+    response = client.get(url)
     response.raise_for_status()
     time.sleep(REQUEST_INTERVAL)
 
-    data = response.json()
+    text = response.text
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    return data
+    cache_path.write_text(text, encoding="utf-8")
+    return text
 
 
-def _subpages(client: httpx.Client, page_id: str) -> list[dict[str, Any]]:
-    """
-    Get the list of subpages for a given page ID.
-    """
-    data = _get_json(client, f"pages/{page_id}/subpages")
-    return _as_list(data.get("page.subpage"))
+def _leaf_urls(client: httpx.Client) -> list[str]:
+    """sitemap から対象書籍の葉ページ URL を, 本の順序で返す."""
+    xml = _fetch(client, SITEMAP_URL, suffix=".xml")
+    all_urls = re.findall(r"<loc>(.*?)</loc>", xml)
+    book_urls = sorted(u for u in all_urls if u.startswith(BOOK_PREFIX))
+    # 子を持つ URL は容れ物なので除く
+    parents = {u.rsplit("/", 1)[0] for u in book_urls}
+    return [u for u in book_urls if u not in parents]
 
 
-def _contents(client: httpx.Client, page_id: str) -> str:
-    """
-    Get the HTML contents of a page.
-    """
-    data = _get_json(client, f"pages/{page_id}/contents")
-    body = _as_list(data.get("body"))
-    if not body:
-        return ""
-    first = body[0]
-    if isinstance(first, str):
-        return first
-    return ""
+def _toc_path(url: str) -> tuple[str, ...]:
+    """URL から目次パスを作る."""
+    relative = url[len(BOOK_PREFIX) :]
+    return tuple(
+        re.sub(r"\s+", " ", unquote(seg).replace("_", " ")).strip()
+        for seg in relative.split("/")
+    )
 
 
-def _is_excluded(title: str) -> bool:
-    """
-    Check if a title matches any of the excluded patterns.
-    """
-    for excluded_pattern in EXCLUDE_PATTERNS:
-        if excluded_pattern in title:
-            return True
+def _doc_id(url: str) -> str:
+    """URL から安定した文書 ID を作る."""
+    return hashlib.sha1(url.encode("utf-8")).hexdigest()[:12]
+
+
+def _is_excluded(toc_path: tuple[str, ...]) -> bool:
+    """本文ページでないなら True を返す."""
+    for segment in toc_path:
+        for excluded_pattern in EXCLUDE_PATTERNS:
+            if excluded_pattern in segment:
+                return True
     return False
 
 
-def _walk(client: httpx.Client, page_id: str, toc_path: tuple[str, ...], ctx: RunContext) -> list[Document]:
-    """
-    get the list of documents by walking through the subpages recursively.
-    """
-    documents: list[Document] = []
 
-    for child in _subpages(client, page_id):
-        title = child["title"]
-        if _is_excluded(title):
+def _is_summary(toc_path: tuple[str, ...]) -> bool:
+    """章末要約ページなら True を返す."""
+    return SUMMARY_MARKER in toc_path[-1]
+
+
+def _extract_body(html: str) -> str:
+    """ページ HTML から本文セクションだけを取り出す."""
+    soup = BeautifulSoup(html, "html.parser")
+    container = soup.find("section", class_="mt-content-container")
+    if container is None:
+        return ""
+    return str(container)
+
+
+def _extract_key_terms(html: str, chapter: str) -> list[Term]:
+    """章末要約ページから Key Terms の表を取り出す."""
+    soup = BeautifulSoup(html, "html.parser")
+    anchor = soup.find(id="Key_Terms")
+    if anchor is None:
+        return []
+    table = anchor.find_next("table")
+    if table is None:
+        return []
+
+    terms: list[Term] = []
+    for row in table.find_all("tr"):
+        cells = row.find_all("td")
+        if len(cells) < 2:
             continue
+        surface = cells[0].get_text(strip=True)
+        if surface:
+            terms.append(Term(surface=surface, source_chapter=chapter))
+    return terms
 
-        child_id = child["@id"]
-        child_path = toc_path + (title,)
 
-        if child.get("@subpages") == "true":
-            found = _walk(client, child_id, child_path, ctx)
-            ctx.log("acquire.chapter", title=title, n_docs=len(found))
-            documents.extend(found)
-        else:
+def run(ctx: RunContext) -> list[Corpus]:
+    """LibreTexts から教科書を取得する."""
+    ctx.log("acquire.start", book=BOOK_TITLE)
+
+    documents: list[Document] = []
+    terms: list[Term] = []
+
+    with httpx.Client(
+        headers={"User-Agent": USER_AGENT},
+        timeout=30.0,
+        follow_redirects=True,
+    ) as client:
+        urls = _leaf_urls(client)
+        ctx.log("acquire.pages_found", n_pages=len(urls))
+
+        for url in urls:
+            toc_path = _toc_path(url)
+
+            if _is_summary(toc_path):
+                found = _extract_key_terms(_fetch(client, url), toc_path[0])
+                terms.extend(found)
+                ctx.log("acquire.key_terms", chapter=toc_path[0], n_terms=len(found))
+                continue
+
+            if _is_excluded(toc_path):
+                continue
+
             documents.append(
                 Document(
-                    doc_id=child_id,
-                    title=title,
-                    html=_contents(client, child_id),
-                    toc_path=child_path,
+                    doc_id=_doc_id(url),
+                    title=toc_path[-1],
+                    html=_extract_body(_fetch(client, url)),
+                    toc_path=toc_path,
+                    order=len(documents),
                 )
             )
-    return documents
-
-def run(ctx: RunContext) -> Corpus:
-    """
-    Acquire a corpus of documents.
-    """
-    ctx.log("acquire.start", book_id=BOOK_ID)
-
-    with httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=30.0) as client:
-        book = _get_json(client, f"pages/{BOOK_ID}")
-        documents = _walk(client, BOOK_ID, (), ctx)
 
     corpus = Corpus(
         book_id=BOOK_ID,
-        book_title=book["title"],
+        book_title=BOOK_TITLE,
         documents=documents,
+        terms=terms,
     )
-    ctx.log("acquire.done", n_docs=len(documents))
-    return corpus
+    ctx.log("acquire.done", n_docs=len(documents), n_terms=len(terms))
+    return [corpus]
