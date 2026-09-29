@@ -2,7 +2,7 @@ import hashlib
 import re
 import time
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -14,7 +14,6 @@ from myprogram.types import Corpus, Document, Term
 BASE_URL = "https://phys.libretexts.org"
 SITEMAP_URL = f"{BASE_URL}/sitemap.xml"
 REQUEST_INTERVAL = 5.0
-CACHE_DIR = DATA_DIR / "raw" / "phys"
 USER_AGENT = "Research bot (LibreTexts structure study)"
 
 # University Physics I (OpenStax)
@@ -32,12 +31,28 @@ EXCLUDE_PATTERNS = ("(Exercises)", "Front Matter", "Back Matter", "Index", "Glos
 SUMMARY_MARKER = "(Summary)"
 
 
+BOOK_PATH = BOOK_PREFIX.removeprefix(f"{BASE_URL}/")
+
+
+def _is_foreign(html: str) -> bool:
+    """他の書籍から転載されたページなら True を返す."""
+    soup = BeautifulSoup(html, "html.parser")
+    for widget in soup.find_all(attrs={"data-page": True}):
+        if not widget["data-page"].startswith(BOOK_PATH):
+            return True
+    return False
+
+
 def _cache_path(url: str, suffix: str = ".html") -> Path:
-    """URL からキャッシュファイルのパスを作る."""
+    """URL からキャッシュファイルのパスを作る.
+
+    保存先はホスト名から決まるので, どのライブラリの URL でも扱える.
+    """
+    library = urlparse(url).hostname.split(".")[0]
     last_segment = unquote(url.rstrip("/").rsplit("/", 1)[-1])
     stem = re.sub(r"[^A-Za-z0-9._-]", "_", last_segment)[:60]
     digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:12]
-    return CACHE_DIR / f"{stem}__{digest}{suffix}"
+    return DATA_DIR / "raw" / library / f"{stem}__{digest}{suffix}"
 
 
 def _fetch(client: httpx.Client, url: str, suffix: str = ".html") -> str:
@@ -52,7 +67,10 @@ def _fetch(client: httpx.Client, url: str, suffix: str = ".html") -> str:
 
     text = response.text
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(text, encoding="utf-8")
+    # 途中で中断されても壊れたキャッシュが残らないよう, 書き切ってから差し替える
+    temporary_path = cache_path.with_name(cache_path.name + ".tmp")
+    temporary_path.write_text(text, encoding="utf-8")
+    temporary_path.replace(cache_path)
     return text
 
 
@@ -121,7 +139,12 @@ def _extract_key_terms(html: str, chapter: str) -> list[Term]:
             continue
         surface = cells[0].get_text(strip=True)
         if surface:
-            terms.append(Term(surface=surface, source_chapter=chapter))
+            terms.append(Term(
+                # TODO: term_idはのちに正規化された Wikipedia のタイトルに置き換える
+                term_id=surface.lower(),
+                surface=surface,
+                source_chapter=chapter
+            ))
     return terms
 
 
@@ -152,11 +175,16 @@ def run(ctx: RunContext) -> list[Corpus]:
             if _is_excluded(toc_path):
                 continue
 
+            html = _fetch(client, url)
+            if _is_foreign(html):
+                ctx.log("acquire.skip_foreign", title=toc_path[-1])
+                continue
+
             documents.append(
                 Document(
                     doc_id=_doc_id(url),
                     title=toc_path[-1],
-                    html=_extract_body(_fetch(client, url)),
+                    html=_extract_body(html),
                     toc_path=toc_path,
                     order=len(documents),
                 )
