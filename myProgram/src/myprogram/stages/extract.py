@@ -1,38 +1,46 @@
 import re
-from bs4 import BeautifulSoup
 from collections import Counter, defaultdict
 from itertools import combinations
-from myprogram.context import RunContext
-from myprogram.types import Corpus, Edge, Occurrence, Term, TermNode, WordGraph
 
+from bs4 import BeautifulSoup
+
+from myprogram.alcpl import load_concepts, surface_form
+from myprogram.context import RunContext
+from myprogram.domain import ACTIVE
+from myprogram.types import Corpus, Edge, Occurrence, TermNode, WordGraph
+
+# 語彙として使う AL-CPL の分野. acquire が読む棚と同じ設定から取る.
+DOMAIN = ACTIVE.name
+
+# 共起とみなす範囲.
+#   "section"   節 (中央値 26 段落). 辺候補が多く, グラフは密になる
+#   "paragraph" 段落. より強い関連に絞れるが, 1 段落の概念数は中央値 2 と少ない
+COOCCURRENCE_WINDOW = "section"
 
 # 本文でない要素. クラス名で除去する.
 DROP_SELECTORS = (
-    "section.box-objectives",     # Learning Objectives
-    "div.mt-contributor",         # Contributors and Attributions
-    "figcaption",                 # 図のキャプション
+    "section.box-objectives",  # Learning Objectives
+    "div.mt-contributor",  # Contributors and Attributions
+    "figcaption",  # 図のキャプション
 )
-MATH_PATTERN = re.compile(r"\\\[.*?\\\]|\\\(.*?\\\)", re.S)
-APOSTROPHES = str.maketrans({"\u2019": "'", "\u2018": "'", "\u0060": "'"})
-PAREN_PATTERN = re.compile(r"\s*\(([^)]*)\)")
+
+# 概念名を含むが概念を指さない慣用句. 概念より長いので先に消費される.
+STOP_PHRASES = (
+    "in light of",
+    "traffic light",
+    "power series",
+    "in terms of",
+    "work out",
+)
+
+MATH_PATTERN = re.compile(r"\\\[.*?\\\]|\\\(.*?\\\)", re.DOTALL)
+APOSTROPHES = str.maketrans({"’": "'", "‘": "'", "`": "'"})
 
 
 def _normalize(text: str) -> str:
     """照合のために表記を揃える."""
     return text.translate(APOSTROPHES)
 
-
-def _surface_variants(surface: str) -> list[str]:
-    """1つの用語から照合に使う表記の候補を返す."""
-    surface = _normalize(surface)
-    # 括弧を外した本体
-    variants = [PAREN_PATTERN.sub("", surface).strip()]
-    # 括弧の中身が別名なら, それも候補にする
-    for inner in PAREN_PATTERN.findall(surface):
-        alias = inner.removeprefix("or ").strip()
-        if len(alias) >= 3:
-            variants.append(alias)
-    return [v for v in variants if v]
 
 def _to_paragraphs(html: str) -> list[str]:
     """本文 HTML を段落のリストに変換する."""
@@ -43,29 +51,34 @@ def _to_paragraphs(html: str) -> list[str]:
             element.decompose()
 
     paragraphs = []
-    for p in soup.find_all("p"):
-        text = _normalize(p.get_text(" ", strip=True))
+    for element in soup.find_all(["p", "li"]):
+        # 中に <p> を含む <li> は, その <p> 側で拾うので飛ばす
+        if element.name == "li" and element.find("p") is not None:
+            continue
+        text = _normalize(element.get_text(" ", strip=True))
         text = MATH_PATTERN.sub(" ", text)
         text = re.sub(r"\s+", " ", text).strip()
         if text:
             paragraphs.append(text)
     return paragraphs
 
-def _build_lexicon(terms: list[Term]) -> tuple[re.Pattern[str], dict[str, str]]:
-    """照合用の正規表現と, 表記 -> term_id の対応表を作る."""
-    lexicon: dict[str, str] = {}
-    for term in terms:
-        for variant in _surface_variants(term.surface):
-            lexicon.setdefault(variant.lower(), term.term_id)
 
-    # 長い表記を優先し, 語尾の複数形を許容する
-    surfaces = sorted(lexicon, key=len, reverse=True)
+def _build_lexicon(concepts: list[str]) -> tuple[re.Pattern[str], dict[str, str]]:
+    """照合用の正規表現と, 表記 -> 概念名 の対応表を作る."""
+    lexicon: dict[str, str] = {}
+    for concept in concepts:
+        surface = _normalize(surface_form(concept)).lower()
+        if surface:
+            lexicon.setdefault(surface, concept)
+
+    # 長い表記を優先する. 除外句は概念より長いので, 概念を隠すように働く.
+    surfaces = sorted(set(lexicon) | set(STOP_PHRASES), key=len, reverse=True)
     alternation = "|".join(re.escape(s) + r"(?:e?s)?" for s in surfaces)
     return re.compile(rf"\b(?:{alternation})\b", re.IGNORECASE), lexicon
 
 
 def _lookup(matched: str, lexicon: dict[str, str]) -> str | None:
-    """一致した文字列から term_id を引く."""
+    """一致した文字列から概念名を引く. 除外句や未知の表記なら None."""
     key = _normalize(matched).lower()
     if key in lexicon:
         return lexicon[key]
@@ -75,18 +88,22 @@ def _lookup(matched: str, lexicon: dict[str, str]) -> str | None:
     return None
 
 
-def _collect_occurrences(corpus: Corpus, ctx: RunContext) -> list[Occurrence]:
-    """1 冊の本から用語の出現をすべて集める."""
-    pattern, lexicon = _build_lexicon(corpus.terms)
+def _collect_occurrences(
+    corpus: Corpus,
+    pattern: re.Pattern[str],
+    lexicon: dict[str, str],
+    ctx: RunContext,
+) -> list[Occurrence]:
+    """1 冊の本から概念の出現をすべて集める."""
     occurrences: list[Occurrence] = []
-    n_unresolved = 0
+    n_dropped = 0
 
     for document in corpus.documents:
         for paragraph_index, paragraph in enumerate(_to_paragraphs(document.html)):
             for match in pattern.finditer(paragraph):
                 term_id = _lookup(match.group(), lexicon)
                 if term_id is None:
-                    n_unresolved += 1
+                    n_dropped += 1
                     continue
                 occurrences.append(
                     Occurrence(
@@ -103,7 +120,8 @@ def _collect_occurrences(corpus: Corpus, ctx: RunContext) -> list[Occurrence]:
         "extract.collected",
         book_id=corpus.book_id,
         n_occurrences=len(occurrences),
-        n_unresolved=n_unresolved,
+        n_terms=len({o.term_id for o in occurrences}),
+        n_dropped=n_dropped,
     )
     return occurrences
 
@@ -113,49 +131,83 @@ def _position(occurrence: Occurrence) -> tuple[int, int, int]:
     return (occurrence.doc_order, occurrence.paragraph, occurrence.char_offset)
 
 
-# TODO: evaluationでも使う予定.
 def first_occurrences(occurrences: list[Occurrence]) -> dict[str, Occurrence]:
-    """用語ごとの初出を返す."""
+    """概念ごとの初出を返す."""
     first: dict[str, Occurrence] = {}
     for occurrence in sorted(occurrences, key=_position):
         first.setdefault(occurrence.term_id, occurrence)
     return first
 
 
-def _count_cooccurrences(
-    occurrences: list[Occurrence],
-    first: dict[str, Occurrence],
-) -> Counter[tuple[str, str]]:
-    """節ごとに用語のペアを数える. 向きは初出が早いほうから遅いほうへ."""
-    terms_by_document: dict[int, set[str]] = defaultdict(set)
+def _window_key(occurrence: Occurrence) -> tuple[int, ...]:
+    """共起ウィンドウを識別するキーを返す."""
+    if COOCCURRENCE_WINDOW == "paragraph":
+        return (occurrence.doc_order, occurrence.paragraph)
+    return (occurrence.doc_order,)
+
+
+def _cooccurring_pairs(occurrences: list[Occurrence]) -> set[tuple[str, str]]:
+    """同じウィンドウに現れた概念のペアを返す. 向きは持たず, 常に (小, 大) の順."""
+    terms_by_window: dict[tuple[int, ...], set[str]] = defaultdict(set)
     for occurrence in occurrences:
-        terms_by_document[occurrence.doc_order].add(occurrence.term_id)
+        terms_by_window[_window_key(occurrence)].add(occurrence.term_id)
 
-    weights: Counter[tuple[str, str]] = Counter()
-    for term_ids in terms_by_document.values():
-        for a, b in combinations(sorted(term_ids), 2):
+    pairs: set[tuple[str, str]] = set()
+    for term_ids in terms_by_window.values():
+        pairs.update(combinations(sorted(term_ids), 2))
+    return pairs
+
+
+def _count_votes(
+    pairs: set[tuple[str, str]],
+    first_by_book: dict[str, dict[str, Occurrence]],
+) -> Counter[tuple[str, str]]:
+    """ペアごとに, どちらを先に導入するかを教科書間で投票する.
+
+    投票できるのは両方の概念を扱っている教科書すべて. 共起した節があるかは
+    問わない. 共起を条件にすると投票に使える本が減り, 推定が不安定になるため.
+    1 冊 1 票なので, 重みは「そう並べた教科書の数」になる.
+    """
+    votes: Counter[tuple[str, str]] = Counter()
+    for a, b in pairs:
+        for first in first_by_book.values():
+            if a not in first or b not in first:
+                continue
             if _position(first[a]) < _position(first[b]):
-                weights[(a, b)] += 1
+                votes[(a, b)] += 1
             else:
-                weights[(b, a)] += 1
-    return weights
-
+                votes[(b, a)] += 1
+    return votes
 
 
 def run(corpora: list[Corpus], ctx: RunContext) -> WordGraph:
-    """教科書から用語の共起グラフを構築する."""
-    ctx.log("extract.start", n_docs=sum(len(c.documents) for c in corpora))
+    """教科書から概念の共起グラフを構築する."""
+    concepts = load_concepts(DOMAIN)
+    pattern, lexicon = _build_lexicon(concepts)
+    ctx.log(
+        "extract.start",
+        domain=DOMAIN,
+        window=COOCCURRENCE_WINDOW,
+        n_concepts=len(concepts),
+        n_surfaces=len(lexicon),
+        n_books=len(corpora),
+        n_docs=sum(len(c.documents) for c in corpora),
+    )
 
     occurrences: list[Occurrence] = []
-    weights: Counter[tuple[str, str]] = Counter()
+    cooccurring: set[tuple[str, str]] = set()
+    first_by_book: dict[str, dict[str, Occurrence]] = {}
 
     for corpus in corpora:
-        book_occurrences = _collect_occurrences(corpus, ctx)
-        first = first_occurrences(book_occurrences)
-        weights.update(_count_cooccurrences(book_occurrences, first))
+        book_occurrences = _collect_occurrences(corpus, pattern, lexicon, ctx)
+        # 辺を張るかどうかは共起で決める
+        cooccurring |= _cooccurring_pairs(book_occurrences)
+        # 向きの投票は教科書ごとの初出順から. 本が違えば順序も違ってよい.
+        first_by_book[corpus.book_id] = first_occurrences(book_occurrences)
         occurrences.extend(book_occurrences)
 
-     # ノードは全冊に現れた用語の和集合
+    weights = _count_votes(cooccurring, first_by_book)
+
     books_by_term: dict[str, set[str]] = defaultdict(set)
     counts_by_term: Counter[str] = Counter()
     for occurrence in occurrences:
@@ -188,4 +240,3 @@ def run(corpora: list[Corpus], ctx: RunContext) -> WordGraph:
         n_occurrences=len(occurrences),
     )
     return WordGraph(nodes=nodes, edges=edges, occurrences=occurrences)
-

@@ -1,7 +1,7 @@
 """共起グラフに階層的 SBM を適用する.
 
-    - micromamba run -n gt python script/run_sbm.py runs/<run_id>
-    - micromamba run -n gt python script/run_sbm.py "$(ls -dt runs/*/ | head -1)"
+- micromamba run -n gt python script/run_sbm.py runs/<run_id>
+- micromamba run -n gt python script/run_sbm.py "$(ls -dt runs/*/ | head -1)"
 """
 
 import json
@@ -11,10 +11,10 @@ from pathlib import Path
 import graph_tool.all as gt
 import numpy as np
 
-N_INIT = 20        # 異なる出発点から探索する回数
-DEG_CORR = True    # 次数補正
-MIN_WEIGHT = 1     # この重み未満の辺を捨てる
-N_SWEEPS = 50 # 各出発点からのMCMC掃引
+N_INIT = 20  # 異なる出発点から探索する回数
+DEG_CORR = True  # 次数補正
+MIN_WEIGHT = 1  # この重み未満の辺を捨てる
+N_SWEEPS = 50  # 各出発点からのMCMC掃引
 
 
 def build_graph(nodes, edges):
@@ -41,7 +41,7 @@ def infer(g, weight):
         gt.seed_rng(seed)
         state = gt.minimize_nested_blockmodel_dl(g, base_state_args=args)
         for _ in range(N_SWEEPS):
-            state.multiflip_mcmc_sweep(beta=np.inf, niter=10)   # ← 追加
+            state.multiflip_mcmc_sweep(beta=np.inf, niter=10)  # ← 追加
 
         entropy = float(state.entropy())
         history.append(entropy)

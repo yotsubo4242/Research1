@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from myprogram.context import RunContext
 from myprogram.artifacts import save_word_graph
+from myprogram.context import RunContext
 from myprogram.stages import acquire, extract
 
 
@@ -15,4 +15,3 @@ def run_all(name: str) -> Path:
 
     ctx.log("pipeline.done")
     return ctx.run_dir
-

@@ -8,39 +8,30 @@ import httpx
 from bs4 import BeautifulSoup
 
 from myprogram.context import RunContext
+from myprogram.domain import ACTIVE
 from myprogram.paths import DATA_DIR
-from myprogram.types import Corpus, Document, Term
+from myprogram.types import BookSpec, Corpus, Document
 
-BASE_URL = "https://phys.libretexts.org"
-SITEMAP_URL = f"{BASE_URL}/sitemap.xml"
 REQUEST_INTERVAL = 5.0
 USER_AGENT = "Research bot (LibreTexts structure study)"
 
-# University Physics I (OpenStax)
-BOOK_ID = "university_physics_i_openstax"
-BOOK_TITLE = "University Physics I - Mechanics, Sound, Oscillations, and Waves (OpenStax)"
-BOOK_PREFIX = (
-    f"{BASE_URL}/Bookshelves/University_Physics/University_Physics_(OpenStax)/"
-    "Book%3A_University_Physics_I_-_Mechanics_Sound_Oscillations_and_Waves_(OpenStax)/"
-)
+# 対象は domain.ACTIVE で決まる. 分野の切り替えは環境変数 MYPROGRAM_DOMAIN で.
+BASE_URL = ACTIVE.base_url
+SITEMAP_URL = ACTIVE.sitemap_url
+SHELF_PREFIX = ACTIVE.shelf_prefix
+
+# 教科書でないもの. 棚によっては補助教材が混ざる.
+EXCLUDE_BOOKS = ("Supplemental_Modules",)
 
 # 本文ではないページ.
-EXCLUDE_PATTERNS = ("(Exercises)", "Front Matter", "Back Matter", "Index", "Glossary")
-
-# 章末要約ページ. 本文からは除くが Key Terms の供給源として使う.
-SUMMARY_MARKER = "(Summary)"
-
-
-BOOK_PATH = BOOK_PREFIX.removeprefix(f"{BASE_URL}/")
-
-
-def _is_foreign(html: str) -> bool:
-    """他の書籍から転載されたページなら True を返す."""
-    soup = BeautifulSoup(html, "html.parser")
-    for widget in soup.find_all(attrs={"data-page": True}):
-        if not widget["data-page"].startswith(BOOK_PATH):
-            return True
-    return False
+EXCLUDE_PATTERNS = (
+    "(Exercises)",
+    "(Summary)",
+    "Front Matter",
+    "Back Matter",
+    "Index",
+    "Glossary",
+)
 
 
 def _cache_path(url: str, suffix: str = ".html") -> Path:
@@ -74,19 +65,44 @@ def _fetch(client: httpx.Client, url: str, suffix: str = ".html") -> str:
     return text
 
 
-def _leaf_urls(client: httpx.Client) -> list[str]:
-    """sitemap から対象書籍の葉ページ URL を, 本の順序で返す."""
+def _shelf_urls(client: httpx.Client) -> list[str]:
+    """棚に属する全 URL を sitemap から返す."""
     xml = _fetch(client, SITEMAP_URL, suffix=".xml")
-    all_urls = re.findall(r"<loc>(.*?)</loc>", xml)
-    book_urls = sorted(u for u in all_urls if u.startswith(BOOK_PREFIX))
+    return sorted(
+        u for u in re.findall(r"<loc>(.*?)</loc>", xml) if u.startswith(SHELF_PREFIX)
+    )
+
+
+def _slug(name: str) -> str:
+    """URL の一部から安定した ID を作る."""
+    return re.sub(r"[^a-z0-9]+", "_", unquote(name).lower()).strip("_")
+
+
+def _books(shelf_urls: list[str]) -> list[BookSpec]:
+    """棚の URL 一覧から書籍の一覧を作る."""
+    names = sorted({u[len(SHELF_PREFIX) :].split("/")[0] for u in shelf_urls})
+    return [
+        BookSpec(
+            book_id=_slug(name),
+            title=unquote(name).replace("_", " "),
+            prefix=f"{SHELF_PREFIX}{name}/",
+        )
+        for name in names
+        if not any(pattern in name for pattern in EXCLUDE_BOOKS)
+    ]
+
+
+def _leaf_urls(shelf_urls: list[str], book: BookSpec) -> list[str]:
+    """その書籍の葉ページ URL を, 本の順序で返す."""
+    book_urls = sorted(u for u in shelf_urls if u.startswith(book.prefix))
     # 子を持つ URL は容れ物なので除く
     parents = {u.rsplit("/", 1)[0] for u in book_urls}
     return [u for u in book_urls if u not in parents]
 
 
-def _toc_path(url: str) -> tuple[str, ...]:
+def _toc_path(url: str, book: BookSpec) -> tuple[str, ...]:
     """URL から目次パスを作る."""
-    relative = url[len(BOOK_PREFIX) :]
+    relative = url[len(book.prefix) :]
     return tuple(
         re.sub(r"\s+", " ", unquote(seg).replace("_", " ")).strip()
         for seg in relative.split("/")
@@ -107,94 +123,89 @@ def _is_excluded(toc_path: tuple[str, ...]) -> bool:
     return False
 
 
+def _is_foreign(soup: BeautifulSoup, book: BookSpec) -> bool:
+    """他の書籍から転載されたページなら True を返す."""
+    book_path = book.prefix.removeprefix(f"{BASE_URL}/")
+    for widget in soup.find_all(attrs={"data-page": True}):
+        if not widget["data-page"].startswith(book_path):
+            return True
+    return False
 
-def _is_summary(toc_path: tuple[str, ...]) -> bool:
-    """章末要約ページなら True を返す."""
-    return SUMMARY_MARKER in toc_path[-1]
 
-
-def _extract_body(html: str) -> str:
+def _extract_body(soup: BeautifulSoup) -> str:
     """ページ HTML から本文セクションだけを取り出す."""
-    soup = BeautifulSoup(html, "html.parser")
     container = soup.find("section", class_="mt-content-container")
     if container is None:
         return ""
     return str(container)
 
 
-def _extract_key_terms(html: str, chapter: str) -> list[Term]:
-    """章末要約ページから Key Terms の表を取り出す."""
-    soup = BeautifulSoup(html, "html.parser")
-    anchor = soup.find(id="Key_Terms")
-    if anchor is None:
-        return []
-    table = anchor.find_next("table")
-    if table is None:
-        return []
+def _collect_documents(
+    client: httpx.Client,
+    book: BookSpec,
+    shelf_urls: list[str],
+    ctx: RunContext,
+) -> list[Document]:
+    """1 冊分の本文ページを集める."""
+    documents: list[Document] = []
+    n_skipped = 0
 
-    terms: list[Term] = []
-    for row in table.find_all("tr"):
-        cells = row.find_all("td")
-        if len(cells) < 2:
+    for url in _leaf_urls(shelf_urls, book):
+        toc_path = _toc_path(url, book)
+        if _is_excluded(toc_path):
+            n_skipped += 1
             continue
-        surface = cells[0].get_text(strip=True)
-        if surface:
-            terms.append(Term(
-                # TODO: term_idはのちに正規化された Wikipedia のタイトルに置き換える
-                term_id=surface.lower(),
-                surface=surface,
-                source_chapter=chapter
-            ))
-    return terms
+
+        # パースは1ページにつき1回だけ行い, 判定と抽出で使い回す
+        soup = BeautifulSoup(_fetch(client, url), "html.parser")
+        if _is_foreign(soup, book):
+            n_skipped += 1
+            continue
+
+        documents.append(
+            Document(
+                doc_id=_doc_id(url),
+                title=toc_path[-1],
+                html=_extract_body(soup),
+                toc_path=toc_path,
+                order=len(documents),
+            )
+        )
+
+    ctx.log(
+        "acquire.book",
+        book_id=book.book_id,
+        n_docs=len(documents),
+        n_skipped=n_skipped,
+    )
+    return documents
 
 
 def run(ctx: RunContext) -> list[Corpus]:
-    """LibreTexts から教科書を取得する."""
-    ctx.log("acquire.start", book=BOOK_TITLE)
-
-    documents: list[Document] = []
-    terms: list[Term] = []
+    """棚に並ぶ教科書をすべて取得する."""
+    ctx.log("acquire.start", shelf=SHELF_PREFIX)
 
     with httpx.Client(
         headers={"User-Agent": USER_AGENT},
         timeout=30.0,
         follow_redirects=True,
     ) as client:
-        urls = _leaf_urls(client)
-        ctx.log("acquire.pages_found", n_pages=len(urls))
+        shelf_urls = _shelf_urls(client)
+        books = _books(shelf_urls)
+        ctx.log("acquire.books_found", n_books=len(books))
 
-        for url in urls:
-            toc_path = _toc_path(url)
-
-            if _is_summary(toc_path):
-                found = _extract_key_terms(_fetch(client, url), toc_path[0])
-                terms.extend(found)
-                ctx.log("acquire.key_terms", chapter=toc_path[0], n_terms=len(found))
-                continue
-
-            if _is_excluded(toc_path):
-                continue
-
-            html = _fetch(client, url)
-            if _is_foreign(html):
-                ctx.log("acquire.skip_foreign", title=toc_path[-1])
-                continue
-
-            documents.append(
-                Document(
-                    doc_id=_doc_id(url),
-                    title=toc_path[-1],
-                    html=_extract_body(html),
-                    toc_path=toc_path,
-                    order=len(documents),
-                )
+        corpora = [
+            Corpus(
+                book_id=book.book_id,
+                book_title=book.title,
+                documents=_collect_documents(client, book, shelf_urls, ctx),
             )
+            for book in books
+        ]
 
-    corpus = Corpus(
-        book_id=BOOK_ID,
-        book_title=BOOK_TITLE,
-        documents=documents,
-        terms=terms,
+    ctx.log(
+        "acquire.done",
+        n_books=len(corpora),
+        n_docs=sum(len(c.documents) for c in corpora),
     )
-    ctx.log("acquire.done", n_docs=len(documents), n_terms=len(terms))
-    return [corpus]
+    return corpora

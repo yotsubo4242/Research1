@@ -2,16 +2,6 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
-class Term:
-    # グラフ上の同一性を決める ID. 正規化前は表層形そのもの,
-    # normalize 導入後は Wikipedia の正規タイトルが入る
-    term_id: str
-    # 教科書に現れた表層形
-    surface: str
-    # Key Terms 上の章. 診断用
-    source_chapter: str
-
-@dataclass(frozen=True)
 class Occurrence:
     # 用語の ID
     term_id: str
@@ -42,11 +32,20 @@ class Document:
 
 
 @dataclass(frozen=True)
+class BookSpec:
+    """棚に並んでいる1冊の識別情報."""
+
+    book_id: str
+    title: str
+    # URL の接頭辞. 末尾はスラッシュ.
+    prefix: str
+
+
+@dataclass(frozen=True)
 class Corpus:
     book_id: str
     book_title: str
     documents: list[Document]
-    terms: list[Term]
 
 
 @dataclass(frozen=True)
@@ -79,9 +78,11 @@ class WordGraph:
     occurrences: list[Occurrence]
 
 
-
-@dataclass
-class SBMResult:
-    """
-    The result of a Stochastic Block Model (SBM) analysis on a word graph.
-    """
+@dataclass(frozen=True)
+class PrereqPair:
+    # 学びたい概念
+    concept: str
+    # その前提となる概念(の候補)
+    prerequisite: str
+    # 実際に先修関係が成立するか
+    is_prerequisite: bool

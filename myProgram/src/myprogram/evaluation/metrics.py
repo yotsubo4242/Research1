@@ -1,39 +1,28 @@
-"""分割どうしを比較する指標とベースライン."""
+"""先修関係の予測を評価する指標."""
 
 import random
 from collections.abc import Sequence
 
-from sklearn.metrics import (
-    adjusted_mutual_info_score,
-    adjusted_rand_score,
-    normalized_mutual_info_score,
-)
+from sklearn.metrics import average_precision_score, roc_auc_score
 
 
-def compare(a: Sequence, b: Sequence) -> dict[str, float]:
-    """2 つの分割の一致度を返す."""
+def evaluate(labels: Sequence[bool], scores: Sequence[float]) -> dict[str, float]:
+    """予測スコアを正解ラベルと突き合わせる.
+
+    ap は先行研究が AUPRC として報告している値に対応する.
+    accuracy は「スコアが中央値より上なら正」とした場合の正答率.
+    """
+    ordered = sorted(scores)
+    threshold = ordered[len(ordered) // 2]
+    correct = sum((score > threshold) == label for score, label in zip(scores, labels))
     return {
-        "nmi": float(normalized_mutual_info_score(a, b)),
-        "ami": float(adjusted_mutual_info_score(a, b)),
-        "ari": float(adjusted_rand_score(a, b)),
+        "auc": float(roc_auc_score(labels, scores)),
+        "ap": float(average_precision_score(labels, scores)),
+        "accuracy": correct / len(labels),
     }
 
 
-def order_baseline(positions: Sequence[tuple], k: int) -> list[int]:
-    """初出順に並べて k 個に等分した分割.
-
-    順序の情報しか使わないので, hSBM がこれを上回らなければ
-    順序以上のことを何も見つけていないことになる.
-    """
-    order = sorted(range(len(positions)), key=lambda i: positions[i])
-    labels = [0] * len(positions)
-    for rank, index in enumerate(order):
-        labels[index] = rank * k // len(positions)
-    return labels
-
-
-def shuffled_baseline(labels: Sequence, seed: int = 0) -> list:
-    """同じグループサイズ分布を保ったままランダムに割り当て直した分割."""
-    shuffled = list(labels)
-    random.Random(seed).shuffle(shuffled)
-    return shuffled
+def random_scores(n: int, seed: int = 0) -> list[float]:
+    """下限を確認するための乱数スコア."""
+    rng = random.Random(seed)
+    return [rng.random() for _ in range(n)]
