@@ -1,0 +1,18 @@
+% 自動生成: script/figures.py
+\begin{table}[t]
+  \centering
+  \caption{Leave-one-out agreement. Each textbook is held out in turn; the remaining books vote on the order of every concept pair, and the vote is checked against the held-out book. The null model reassigns concepts to sections at random within each book, preserving the vocabulary, the number of sections and the number of concepts per section; it is repeated 1000 times and the mean and SD are over those repetitions. The last three columns break the agreement down by how strongly the remaining books agreed.}
+  \label{tab:leaveout}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{lrrrrrrrrrr}
+    \toprule
+    & & \multicolumn{4}{c}{Held-out textbook} & \multicolumn{2}{c}{Null model} & \multicolumn{3}{c}{By consensus strength} \\
+    \cmidrule(lr){3-6} \cmidrule(lr){7-8} \cmidrule(lr){9-11}
+    Domain & Books & Mean & SD & Min & $>$0.5 & Mean & SD & 0.5--0.7 & 0.7--0.9 & 0.9--1.0 \\
+    \midrule
+  Physics & 10 & 0.734 & 0.067 & 0.629 & 10/10 & 0.501 & 0.015 & 0.568 & 0.760 & 0.853 \\
+  Geometry & 5 & 0.720 & 0.038 & 0.674 & 5/5 & 0.498 & 0.034 & 0.638 & 0.703 & 0.754 \\
+  Precalculus & 11 & 0.668 & 0.080 & 0.521 & 11/11 & 0.500 & 0.013 & 0.569 & 0.690 & 0.817 \\
+    \bottomrule
+  \end{tabular}}
+\end{table}

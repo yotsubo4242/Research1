@@ -1,0 +1,19 @@
+% 自動生成: script/figures.py
+\begin{table}[t]
+  \centering
+  \caption{Co-occurrence graph statistics. An edge weight is the number of textbooks that introduce the source concept before the target; a pair on which the authors disagree carries an edge in both directions. Reciprocity is the fraction of edges whose reverse also exists, i.e. how often the authors disagree. The last two columns give the size of the largest strongly connected component, first on the full graph and then after keeping only the majority direction of each pair; a value of 1 would mean the consensus order is acyclic.}
+  \label{tab:graph}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{lrrrrrrrrr}
+    \toprule
+    & & & Mean & & & Median & Max & \multicolumn{2}{c}{Largest SCC} \\
+    \cmidrule(lr){9-10}
+    Domain & Nodes & Edges & degree & Density & Recipr. & weight & weight & both & major. \\
+    \midrule
+  Physics & 136 & 8,918 & 65.6 & 0.486 & 0.745 & 3 & 10 & 130 & 115 \\
+  Geometry & 73 & 2,400 & 32.9 & 0.457 & 0.608 & 2 & 5 & 64 & 59 \\
+  Precalculus & 189 & 15,205 & 80.4 & 0.428 & 0.716 & 3 & 10 & 181 & 166 \\
+  Data mining & 62 & 705 & 11.4 & 0.186 & 0.139 & 1 & 2 & 45 & 1 \\
+    \bottomrule
+  \end{tabular}}
+\end{table}

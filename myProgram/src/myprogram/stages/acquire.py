@@ -21,7 +21,8 @@ SITEMAP_URL = ACTIVE.sitemap_url
 SHELF_PREFIX = ACTIVE.shelf_prefix
 
 # 教科書でないもの. 棚によっては補助教材が混ざる.
-EXCLUDE_BOOKS = ("Supplemental_Modules",)
+# 分野固有の除外は domain.ACTIVE.exclude_books 側に書く.
+EXCLUDE_BOOKS = ("Supplemental_Modules", *ACTIVE.exclude_books)
 
 # 本文ではないページ.
 EXCLUDE_PATTERNS = (

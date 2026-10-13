@@ -18,6 +18,9 @@ class DomainConfig:
     library: str
     # 棚の名前
     shelf: str
+    # その棚から外す書籍. URL の書籍名に対する部分一致で判定する.
+    # 版違いの重複や, 教科書でない補助教材を除くために使う.
+    exclude_books: tuple[str, ...] = ()
 
     @property
     def base_url(self) -> str:
@@ -37,7 +40,14 @@ DOMAINS = {
     for config in [
         DomainConfig("physics", "phys", "University_Physics"),
         DomainConfig("geometry", "math", "Geometry"),
-        DomainConfig("precalculus", "math", "Precalculus"),
+        DomainConfig(
+            "precalculus",
+            "math",
+            "Precalculus",
+            # 1e と 2e は版違いで本文が重複する. 新しい 2e だけを残す.
+            # Exercises_(Precalculus) は演習だけの冊子で教科書ではない.
+            exclude_books=("Precalculus_1e_(OpenStax)", "Exercises_(Precalculus)"),
+        ),
         DomainConfig("data_mining", "eng", "Data_Science"),
     ]
 }
